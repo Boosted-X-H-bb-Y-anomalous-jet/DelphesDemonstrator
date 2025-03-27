@@ -1,12 +1,7 @@
 import numpy as np
 import math
-import ctypes
-import ROOT
 
 (pT_i, eta_i, phi_i) = (0, 1, 2)
-
-
-
 
 def ang_dist(phi1, phi2):
     dphi = phi1 - phi2
@@ -19,7 +14,6 @@ def ang_dist(phi1, phi2):
 def raw_moment(jet, eta_order, phi_order):
     return (jet[:,pT_i] * (jet[:,eta_i] ** eta_order) * (jet[:,phi_i] ** phi_order)).sum()
     
-
 def convert_to_pt_eta_phi(jet, jet_conts):
     jet_conv = np.zeros(jet_conts.shape)
     jet_eta = jet[eta_i]
@@ -28,19 +22,17 @@ def convert_to_pt_eta_phi(jet, jet_conts):
     #Loop thru jet conts and convert from px py pz e to pt eta phi m (is there a way to vectorize this?)
     for i in range(jet_conts.shape[0]):
         if(jet_conts[i,3] <= 0.01): continue #skip 0 energy jets, save time
-        vec = ROOT.Math.PxPyPzEVector(jet_conts[i,0], jet_conts[i,1], jet_conts[i,2], jet_conts[i,3])
-        jet_conv[i] = [vec.Pt(), vec.Eta() - jet_eta, ang_dist(vec.Phi(), jet_phi), 0.]
-        pt_sum += vec.Pt()
+        px, py, pz, e = jet_conts[i,0], jet_conts[i,1], jet_conts[i,2], jet_conts[i,3]
+        pt = np.sqrt(px**2 + py**2)
+        eta = np.arcsinh(pz / np.sqrt(px**2 + py**2))
+        phi = np.arctan2(py, px)
+        jet_conv[i] = [pt, eta - jet_eta, ang_dist(phi, jet_phi), 0.]
+        pt_sum += pt
     return jet_conv
-
-
-
-
 
 def pixelate(jet, npix=40, img_width=1.0, rotate = True, norm=True):
     #Augmented version of EnergyFlow package version to add rotation and flipping of jet in pre-processing
     #rotation code based on https://alyssaq.github.io/2015/computing-the-axes-or-orientation-of-a-blob/
-
 
     # the image is (img_width x img_width) in size
     pix_width = img_width / npix
@@ -86,11 +78,6 @@ def pixelate(jet, npix=40, img_width=1.0, rotate = True, norm=True):
         if(ptmax_phi < 0): phi_transformed *= -1.
     else:
         eta_transformed, phi_transformed = jet[:,eta_i], jet[:,phi_i]
-
-    
-
-
-
 
     mid_pix = np.floor(npix/2)
     # transition to indices
