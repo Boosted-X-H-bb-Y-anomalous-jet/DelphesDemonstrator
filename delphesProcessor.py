@@ -7,9 +7,10 @@ import sys
 import tensorflow as tf
 import numpy as np
 import os
+import onnxruntime as ort
 
 nMaxPreselected = 3000
-anomalyThreshold = 0.00002 #SR cut
+anomalyThreshold = 0.00003 #SR cut
 
 
 def append_ae_loss_to_h5(fout):
@@ -227,48 +228,113 @@ def select_and_convert(file_name, output_file):
     
     return nTotal
 
-def test():
+def run_test_inference():
     inputfile = "input/test_input.root"
     nProcessed, nPreselected, nTagged = process_dataset(inputfile)
     print(nProcessed, nPreselected, nTagged)
 
 
+def evaluate_h5_vs_onnx(fdata):
+    model_h5 = tf.keras.models.load_model(os.path.join(os.getcwd(), "autoencoder.h5"))
+    onnx_session = ort.InferenceSession(os.path.join(os.getcwd(), "autoencoder.onnx"))
+
+    H_jet_idx = fdata["H_jet_idx"][:]
+    fsignal1 = fdata["j1_images"][:, :, :]
+    fsignal2 = fdata["j2_images"][:, :, :]
+    fsignalY = [fsignal1[i] if H_jet_idx[i] == 1 else fsignal2[i] for i in range(len(H_jet_idx))]
+
+    fsignal1 = np.expand_dims(fsignal1, axis=-1).astype(np.float32)
+    fsignal2 = np.expand_dims(fsignal2, axis=-1).astype(np.float32)
+    fsignalY = np.expand_dims(fsignalY, axis=-1).astype(np.float32)
+
+    def predict_onnx(input_array):
+        return onnx_session.run(None, {"input": input_array})[0]
+
+    def ae_loss(x, x_hat):
+        return np.mean(np.square(x - x_hat), axis=(1, 2)).reshape(-1)
+
+    def fraction_above_threshold(loss_array):
+        return np.sum(loss_array > anomalyThreshold) / len(loss_array)
+
+    reco1_h5 = model_h5.predict(fsignal1, batch_size=1)
+    reco2_h5 = model_h5.predict(fsignal2, batch_size=1)
+    recoY_h5 = model_h5.predict(fsignalY, batch_size=1)
+
+    reco1_onnx = predict_onnx(fsignal1)
+    reco2_onnx = predict_onnx(fsignal2)
+    recoY_onnx = predict_onnx(fsignalY)
+
+    loss1_h5 = ae_loss(fsignal1, reco1_h5)
+    loss2_h5 = ae_loss(fsignal2, reco2_h5)
+    lossY_h5 = ae_loss(fsignalY, recoY_h5)
+
+    loss1_onnx = ae_loss(fsignal1, reco1_onnx)
+    loss2_onnx = ae_loss(fsignal2, reco2_onnx)
+    lossY_onnx = ae_loss(fsignalY, recoY_onnx)
+
+    print("Comparison of AE Losses (mean ± std)")
+    #print(f"j1  - H5: {np.mean(loss1_h5):.6f} ± {np.std(loss1_h5):.6f} | ONNX: {np.mean(loss1_onnx):.6f} ± {np.std(loss1_onnx):.6f}")
+    #print(f"j2  - H5: {np.mean(loss2_h5):.6f} ± {np.std(loss2_h5):.6f} | ONNX: {np.mean(loss2_onnx):.6f} ± {np.std(loss2_onnx):.6f}")
+    print(f"Y   - H5: {np.mean(lossY_h5):.6f} ± {np.std(lossY_h5):.6f} | ONNX: {np.mean(lossY_onnx):.6f} ± {np.std(lossY_onnx):.6f}")
+
+    print(f"\nFraction of events with AE loss > {anomalyThreshold}")
+    #print(f"j1  - H5: {fraction_above_threshold(loss1_h5):.3%} | ONNX: {fraction_above_threshold(loss1_onnx):.3%}")
+    #print(f"j2  - H5: {fraction_above_threshold(loss2_h5):.3%} | ONNX: {fraction_above_threshold(loss2_onnx):.3%}")
+    print(f"Y   - H5: {fraction_above_threshold(lossY_h5):.3%} | ONNX: {fraction_above_threshold(lossY_onnx):.3%}")
+
+    return {
+        "loss_h5": {"j1": loss1_h5, "j2": loss2_h5, "Y": lossY_h5},
+        "loss_onnx": {"j1": loss1_onnx, "j2": loss2_onnx, "Y": lossY_onnx}
+    }
+
+def validate_onnx():
+    print("Validating on QCD")
+    with h5py.File("input/test_input_QCD.h5","r") as fdata:
+        results = evaluate_h5_vs_onnx(fdata)
+
+    print("Validating on signal")
+    with h5py.File("input/test_input_signal.h5","r") as fdata:
+        results = evaluate_h5_vs_onnx(fdata)
+
 if __name__ == "__main__":
-    #test()
-    processes = []
-    name_conversion = {}
-    output_filename = "delphes_anomaly_tagging_efficiencies.csv"
+    run_test_inference()
+    validate_onnx()
+    calculate_efficiencies = False
+    if calculate_efficiencies:
+        processes = []
+        name_conversion = {}
+        output_filename = "delphes_anomaly_tagging_efficiencies.csv"
 
-    for mx in ["1400","1600","1800","2000","2200","2600","3000"]:
-        process_2t = f"MX{mx}_MY400_YTo2T"
-        process_2u = f"MX{mx}_MY200_YTo2U"
-        processes.append(process_2t)
-        processes.append(process_2u)
-        name_conversion[process_2t]=f"XToYH_HTo2BYTo2T_Hadronic_MX-{mx}_MY-400"
-        name_conversion[process_2u]=f"XToYH_HTo2BYTo2Up_MX-{mx}_MY-200"
+        for mx in ["1400","1600","1800","2000","2200","2600","3000"]:
+            process_2t = f"MX{mx}_MY400_YTo2T"
+            process_2u = f"MX{mx}_MY200_YTo2U"
+            processes.append(process_2t)
+            processes.append(process_2u)
+            name_conversion[process_2t]=f"XToYH_HTo2BYTo2T_Hadronic_MX-{mx}_MY-400"
+            name_conversion[process_2u]=f"XToYH_HTo2BYTo2Up_MX-{mx}_MY-200"
 
 
-    for mx in ["1400","1600","1800","2000","2400","3000"]:
-        process_bqq = f"MT{mx}_MH125"
-        processes.append(process_bqq)
-        name_conversion[process_bqq]=f"TPrime_MX-{mx}_MY-125"
+        for mx in ["1400","1600","1800","2000","2400","3000"]:
+            process_bqq = f"MT{mx}_MH125"
+            processes.append(process_bqq)
+            name_conversion[process_bqq]=f"TPrime_MX-{mx}_MY-125"
 
-    MX = ["1400","1600","1800","2000","2200","2600","3000"]
-    MY = ["90","125","190","250","300","400"]
-    for mx in MX:
-        for my in MY:
-            process_ww = f"MX{mx}_MY{my}"
-            processes.append(process_ww)
-            name_conversion[process_ww]=process_ww
+        MX = ["1400","1600","1800","2000","2200","2600","3000"]
+        MY = ["90","125","190","250","300","400"]
+        for mx in MX:
+            for my in MY:
+                process_ww = f"MX{mx}_MY{my}"
+                processes.append(process_ww)
+                name_conversion[process_ww]=process_ww
 
-    with open(output_filename, "w", newline="") as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(["Process", "Efficiency","Eff. with anomaly tagging" ,"Total Processed", "Preselected", "Anomaly tagged"])
-        for process in processes:
-            inputfile = f"input/delphes_{process}.root"
-            if not isfile(inputfile):
-                continue
-            nProcessed, nPreselected, nTagged = process_dataset(inputfile)
-            efficiency = nPreselected/nProcessed
-            efficiency_anomaly = nTagged / nProcessed
-            writer.writerow([name_conversion[process],     f"{efficiency:.3f}", f"{efficiency_anomaly:.3f}" , nProcessed, nPreselected, nTagged])
+        with open(output_filename, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["Process", "Efficiency","Eff. with anomaly tagging" ,"Total Processed", "Preselected", "Anomaly tagged"])
+            for process in processes:
+                inputfile = f"input/delphes_{process}.root"
+                if not isfile(inputfile):
+                    continue
+                nProcessed, nPreselected, nTagged = process_dataset(inputfile)
+                efficiency = nPreselected/nProcessed
+                efficiency_anomaly = nTagged / nProcessed
+                writer.writerow([name_conversion[process],     f"{efficiency:.3f}", f"{efficiency_anomaly:.3f}" , nProcessed, nPreselected, nTagged])
