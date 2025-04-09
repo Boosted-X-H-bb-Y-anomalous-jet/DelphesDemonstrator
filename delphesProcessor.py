@@ -12,7 +12,7 @@ nMaxPreselected = 3000
 anomalyThreshold = 0.00002 #SR cut
 
 
-def append_VAE_loss_to_h5(fout):
+def append_ae_loss_to_h5(fout):
     model_name = os.path.join(os.getcwd(), "autoencoder.h5") #We have to give absolute path here
     model = tf.keras.models.load_model(model_name)
         
@@ -31,19 +31,19 @@ def append_VAE_loss_to_h5(fout):
     reco_signal2 = model.predict(fsignal2, batch_size = 1)
     reco_signalY = model.predict(fsignalY, batch_size = 1)
 
-    vae_loss1 =  np.mean(np.square(reco_signal1 - fsignal1), axis=(1,2)).reshape(-1)
-    vae_loss2 =  np.mean(np.square(reco_signal2 - fsignal2), axis=(1,2)).reshape(-1)
-    vae_lossY =  np.mean(np.square(reco_signalY - fsignalY), axis=(1,2)).reshape(-1)
+    ae_loss1 =  np.mean(np.square(reco_signal1 - fsignal1), axis=(1,2)).reshape(-1)
+    ae_loss2 =  np.mean(np.square(reco_signal2 - fsignal2), axis=(1,2)).reshape(-1)
+    ae_lossY =  np.mean(np.square(reco_signalY - fsignalY), axis=(1,2)).reshape(-1)
     
-    fout.create_dataset("vae_loss1", data=vae_loss1, chunks = True, maxshape=(None,), compression = 'gzip')
-    fout.create_dataset("vae_loss2", data=vae_loss2, chunks = True, maxshape=(None,), compression = 'gzip')
-    fout.create_dataset("vae_lossY", data=vae_lossY, chunks = True, maxshape=(None,), compression = 'gzip')
-    print("Appended vae_loss to file")
+    fout.create_dataset("ae_loss1", data=ae_loss1, chunks = True, maxshape=(None,), compression = 'gzip')
+    fout.create_dataset("ae_loss2", data=ae_loss2, chunks = True, maxshape=(None,), compression = 'gzip')
+    fout.create_dataset("ae_lossY", data=ae_lossY, chunks = True, maxshape=(None,), compression = 'gzip')
+    print("Appended ae_loss to file")
 
-def count_low_vae_loss(f, threshold):
-    vae_lossY = f["vae_lossY"][:]
-    total_events = len(vae_lossY)
-    passing_events = (vae_lossY > threshold).sum()
+def count_low_ae_loss(f, threshold):
+    ae_lossY = f["ae_lossY"][:]
+    total_events = len(ae_lossY)
+    passing_events = (ae_lossY > threshold).sum()
     return total_events, passing_events
 
 def process_dataset(input_rootfile):
@@ -52,10 +52,10 @@ def process_dataset(input_rootfile):
         select_and_convert(input_rootfile,output_h5)
         make_jet_images.add_images(output_h5)
         with h5py.File(output_h5,"a") as fout:
-            append_VAE_loss_to_h5(fout)
+            append_ae_loss_to_h5(fout)
         
     with h5py.File(output_h5,"r") as f:
-        nPreselected, nTagged = count_low_vae_loss(f,anomalyThreshold)
+        nPreselected, nTagged = count_low_ae_loss(f,anomalyThreshold)
         nProcessed = f['nProcessed'][()]
 
 
@@ -128,7 +128,7 @@ def select_and_convert(file_name, output_file):
                 
                 higgs_indices = np.where(gen_particle_pid[event_idx] == 25)[0]
                 if len(higgs_indices) == 0:
-                    continue
+                    higgs_indices=[1]#In QCD events, we don't have H so we (arbitrarily) take the second jet as the H cand jet
                 
                 # Take the first Higgs boson if multiple exist
                 higgs_idx = higgs_indices[0]
@@ -232,23 +232,43 @@ def test():
     nProcessed, nPreselected, nTagged = process_dataset(inputfile)
     print(nProcessed, nPreselected, nTagged)
 
+
 if __name__ == "__main__":
-    test()
-    exit()
+    #test()
+    processes = []
+    name_conversion = {}
+    output_filename = "delphes_anomaly_tagging_efficiencies.csv"
+
+    for mx in ["1400","1600","1800","2000","2200","2600","3000"]:
+        process_2t = f"MX{mx}_MY400_YTo2T"
+        process_2u = f"MX{mx}_MY200_YTo2U"
+        processes.append(process_2t)
+        processes.append(process_2u)
+        name_conversion[process_2t]=f"XToYH_HTo2BYTo2T_Hadronic_MX-{mx}_MY-400"
+        name_conversion[process_2u]=f"XToYH_HTo2BYTo2Up_MX-{mx}_MY-200"
+
+
+    for mx in ["1400","1600","1800","2000","2400","3000"]:
+        process_bqq = f"MT{mx}_MH125"
+        processes.append(process_bqq)
+        name_conversion[process_bqq]=f"TPrime_MX-{mx}_MY-125"
 
     MX = ["1400","1600","1800","2000","2200","2600","3000"]
     MY = ["90","125","190","250","300","400"]
-    output_filename = "delphes_anomaly_tagging_efficiencies.csv"
+    for mx in MX:
+        for my in MY:
+            process_ww = f"MX{mx}_MY{my}"
+            processes.append(process_ww)
+            name_conversion[process_ww]=process_ww
+
     with open(output_filename, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Process", "Efficiency","Eff. with anomaly tagging" ,"Total Processed", "Preselected", "Anomaly tagged"])
-        for mx in MX:
-            for my in MY:
-                process = f"MX{mx}_MY{my}"
-                inputfile = f"input/delphes_{process}.root"
-                if not isfile(inputfile):
-                    continue
-                nProcessed, nPreselected, nTagged = process_dataset(inputfile)
-                efficiency = nPreselected/nTagged
-                efficiency_anomaly = nTagged / nProcessed
-                writer.writerow([process, efficiency, efficiency_anomaly, nProcessed, nPreselected, nTagged])
+        for process in processes:
+            inputfile = f"input/delphes_{process}.root"
+            if not isfile(inputfile):
+                continue
+            nProcessed, nPreselected, nTagged = process_dataset(inputfile)
+            efficiency = nPreselected/nProcessed
+            efficiency_anomaly = nTagged / nProcessed
+            writer.writerow([name_conversion[process],     f"{efficiency:.3f}", f"{efficiency_anomaly:.3f}" , nProcessed, nPreselected, nTagged])
